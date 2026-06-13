@@ -199,10 +199,41 @@ install_snell_binary() {
 run_snell_probe() {
     probe_cmd=$1
     shift
-    # -v/--version 在 Snell v4/v5 中都会快速退出；比 --help 更适合作为运行能力检测。
-    timeout 5s "$probe_cmd" "$@" -v >/tmp/snell-probe.log 2>&1 || \
-        timeout 5s "$probe_cmd" "$@" --version >/tmp/snell-probe.log 2>&1 || \
-        timeout 5s "$probe_cmd" "$@" --help >/tmp/snell-probe.log 2>&1
+
+    : > /tmp/snell-probe.log
+
+    # v4 支持 -v/--version/--help；v5 可能不接受这些探测参数，所以不能只靠版本参数判断。
+    if timeout 5s "$probe_cmd" "$@" -v >>/tmp/snell-probe.log 2>&1 || \
+        timeout 5s "$probe_cmd" "$@" --version >>/tmp/snell-probe.log 2>&1 || \
+        timeout 5s "$probe_cmd" "$@" --help >>/tmp/snell-probe.log 2>&1; then
+        return 0
+    fi
+
+    # 对不支持版本/帮助参数的 Snell，使用临时配置实际拉起服务。
+    # timeout 返回 124 代表服务持续运行到超时，说明二进制可正常执行。
+    probe_port=$(random_port)
+    probe_conf=$(mktemp /tmp/snell-probe.XXXXXX.conf)
+    cat > "$probe_conf" <<EOF_PROBE_CONF
+[snell-server]
+listen = 127.0.0.1:${probe_port}
+psk = snell-probe
+ipv6 = false
+tfo = false
+EOF_PROBE_CONF
+
+    timeout 3s "$probe_cmd" "$@" -c "$probe_conf" >>/tmp/snell-probe.log 2>&1
+    probe_status=$?
+    rm -f "$probe_conf"
+    [ "$probe_status" -eq 0 ] || [ "$probe_status" -eq 124 ]
+}
+
+is_dynamic_elf() {
+    if command -v file >/dev/null 2>&1; then
+        file "$1" 2>/dev/null | grep -qi 'dynamically linked'
+        return $?
+    fi
+    # 没有 file 时保守尝试 loader 路径。
+    return 0
 }
 
 verify_snell_binary() {
@@ -215,24 +246,26 @@ verify_snell_binary() {
         return 0
     fi
 
-    for loader in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2 /usr/glibc-compat/lib/ld-linux-x86-64.so.2; do
-        if [ -x "$loader" ] && run_snell_probe "$loader" "${INSTALL_DIR}/snell-server"; then
-            cat > "${INSTALL_DIR}/snell-server-wrapper" <<EOF_WRAPPER
+    if is_dynamic_elf "${INSTALL_DIR}/snell-server"; then
+        for loader in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2 /usr/glibc-compat/lib/ld-linux-x86-64.so.2; do
+            if [ -x "$loader" ] && run_snell_probe "$loader" "${INSTALL_DIR}/snell-server"; then
+                cat > "${INSTALL_DIR}/snell-server-wrapper" <<EOF_WRAPPER
 #!/bin/sh
 export LD_LIBRARY_PATH="/usr/glibc-compat/lib:/usr/local/lib:/usr/lib:/lib:\${LD_LIBRARY_PATH}"
 export GLIBC_TUNABLES="glibc.pthread.rseq=0"
 exec ${loader} ${INSTALL_DIR}/snell-server "\$@"
 EOF_WRAPPER
-            chmod +x "${INSTALL_DIR}/snell-server-wrapper"
-            SNELL_COMMAND="${INSTALL_DIR}/snell-server-wrapper"
-            return 0
-        fi
-    done
+                chmod +x "${INSTALL_DIR}/snell-server-wrapper"
+                SNELL_COMMAND="${INSTALL_DIR}/snell-server-wrapper"
+                return 0
+            fi
+        done
+    fi
 
     echo -e "${RED}Snell 兼容性测试失败，请检查 glibc/gcompat 环境。${RESET}"
     echo -e "${YELLOW}最近一次检测输出:${RESET}"
     cat /tmp/snell-probe.log 2>/dev/null || true
-    echo -e "${YELLOW}可尝试手动执行: ${INSTALL_DIR}/snell-server -v${RESET}"
+    echo -e "${YELLOW}可尝试手动执行: ${INSTALL_DIR}/snell-server -c ${SNELL_CONF_FILE}${RESET}"
     exit 1
 }
 
