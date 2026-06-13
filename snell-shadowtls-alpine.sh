@@ -40,7 +40,7 @@ check_system() {
 install_dependencies() {
     echo -e "${CYAN}正在安装依赖...${RESET}"
     apk update
-    apk add --no-cache curl wget unzip openssl iptables ip6tables openrc net-tools file coreutils binutils tar gzip libc6-compat libstdc++ libgcc gcompat
+    apk add --no-cache curl wget unzip openssl iptables ip6tables openrc net-tools file coreutils binutils tar gzip xz libc6-compat libstdc++ libgcc gcompat
 
     # Snell 官方 Linux 二进制依赖 glibc。Alpine 下优先安装 sgerrand glibc，失败时仍保留 gcompat 作为兜底。
     if [ ! -f /usr/glibc-compat/lib/ld-linux-x86-64.so.2 ] && [ "$(uname -m)" = "x86_64" ]; then
@@ -86,12 +86,18 @@ get_debian_arch() {
 get_debian_package_filename() {
     deb_arch=$1
     package_name=$2
-    curl -fsSL "https://deb.debian.org/debian/dists/bookworm/main/binary-${deb_arch}/Packages.gz" | \
-        gzip -dc | \
-        awk -v pkg="$package_name" '
-            $1 == "Package:" { in_pkg = ($2 == pkg) }
-            in_pkg && $1 == "Filename:" { print $2; exit }
-        '
+    index_file=$(mktemp)
+    curl -fsSL -o "$index_file" "https://deb.debian.org/debian/dists/bookworm/main/binary-${deb_arch}/Packages.gz" || {
+        rm -f "$index_file"
+        return 1
+    }
+    gzip -dc "$index_file" | awk -v pkg="$package_name" '
+        $1 == "Package:" { in_pkg = ($2 == pkg) }
+        in_pkg && $1 == "Filename:" { print $2; exit }
+    '
+    status=$?
+    rm -f "$index_file"
+    return "$status"
 }
 
 extract_debian_package_libs() {
@@ -125,8 +131,16 @@ install_debian_glibc_runtime() {
             rm -rf "$tmp_dir"
             exit 1
         fi
-        curl -fsSL -o "${tmp_dir}/${pkg}.deb" "https://deb.debian.org/debian/${filename}"
-        extract_debian_package_libs "${tmp_dir}/${pkg}.deb" "$tmp_dir"
+        if ! curl -fsSL -o "${tmp_dir}/${pkg}.deb" "https://deb.debian.org/debian/${filename}"; then
+            echo -e "${RED}下载 Debian 包失败: ${pkg}${RESET}"
+            rm -rf "$tmp_dir"
+            exit 1
+        fi
+        if ! extract_debian_package_libs "${tmp_dir}/${pkg}.deb" "$tmp_dir"; then
+            echo -e "${RED}解压 Debian 包失败: ${pkg}${RESET}"
+            rm -rf "$tmp_dir"
+            exit 1
+        fi
     done
 
     case "$deb_arch" in
@@ -142,6 +156,10 @@ install_debian_glibc_runtime() {
     mkdir -p "$(dirname "$loader_link")"
     if [ -f "${runtime_dir}/${loader}" ]; then
         ln -sf "${runtime_dir}/${loader}" "$loader_link"
+    else
+        echo -e "${RED}未找到 Debian glibc loader: ${loader}${RESET}"
+        rm -rf "$tmp_dir"
+        exit 1
     fi
 
     rm -rf "$tmp_dir"
