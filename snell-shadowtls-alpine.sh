@@ -40,7 +40,7 @@ check_system() {
 install_dependencies() {
     echo -e "${CYAN}正在安装依赖...${RESET}"
     apk update
-    apk add --no-cache curl wget unzip openssl iptables ip6tables openrc net-tools file coreutils libc6-compat libstdc++ libgcc gcompat
+    apk add --no-cache curl wget unzip openssl iptables ip6tables openrc net-tools file coreutils binutils tar gzip libc6-compat libstdc++ libgcc gcompat
 
     # Snell 官方 Linux 二进制依赖 glibc。Alpine 下优先安装 sgerrand glibc，失败时仍保留 gcompat 作为兜底。
     if [ ! -f /usr/glibc-compat/lib/ld-linux-x86-64.so.2 ] && [ "$(uname -m)" = "x86_64" ]; then
@@ -74,10 +74,84 @@ fix_glibc_loader_links() {
     fi
 }
 
+get_debian_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        armv7l|armv7) echo "armhf" ;;
+        *) return 1 ;;
+    esac
+}
+
+get_debian_package_filename() {
+    deb_arch=$1
+    package_name=$2
+    curl -fsSL "https://deb.debian.org/debian/dists/bookworm/main/binary-${deb_arch}/Packages.gz" | \
+        gzip -dc | \
+        awk -v pkg="$package_name" '
+            $1 == "Package:" { in_pkg = ($2 == pkg) }
+            in_pkg && $1 == "Filename:" { print $2; exit }
+        '
+}
+
+extract_debian_package_libs() {
+    deb_file=$1
+    extract_dir=$2
+    work_dir=$(mktemp -d)
+    (
+        cd "$work_dir" || exit 1
+        ar x "$deb_file"
+        data_archive=$(printf '%s\n' data.tar.* | head -n 1)
+        tar -xf "$data_archive" -C "$extract_dir"
+    )
+    status=$?
+    rm -rf "$work_dir"
+    return "$status"
+}
+
+install_debian_glibc_runtime() {
+    # 参考原作者 Dockerfile 的处理方式：不用 Alpine 自带 gcompat 跑 Snell v5，
+    # 而是从 Debian bookworm 提取 glibc/libstdc++/libgcc 运行库到 /usr/glibc-compat/lib。
+    deb_arch=$(get_debian_arch) || { echo -e "${RED}不支持注入 Debian glibc 的架构: $(uname -m)${RESET}"; exit 1; }
+    runtime_dir="/usr/glibc-compat/lib"
+    tmp_dir=$(mktemp -d)
+    mkdir -p "$runtime_dir"
+
+    echo -e "${CYAN}正在注入 Debian bookworm glibc 运行库（用于 Snell v5）...${RESET}"
+    for pkg in libc6 libstdc++6 libgcc-s1; do
+        filename=$(get_debian_package_filename "$deb_arch" "$pkg")
+        if [ -z "$filename" ]; then
+            echo -e "${RED}无法解析 Debian 包: ${pkg}${RESET}"
+            rm -rf "$tmp_dir"
+            exit 1
+        fi
+        curl -fsSL -o "${tmp_dir}/${pkg}.deb" "https://deb.debian.org/debian/${filename}"
+        extract_debian_package_libs "${tmp_dir}/${pkg}.deb" "$tmp_dir"
+    done
+
+    case "$deb_arch" in
+        amd64) gnu_lib_dir="x86_64-linux-gnu"; loader="ld-linux-x86-64.so.2"; loader_link="/lib64/ld-linux-x86-64.so.2" ;;
+        arm64) gnu_lib_dir="aarch64-linux-gnu"; loader="ld-linux-aarch64.so.1"; loader_link="/lib/ld-linux-aarch64.so.1" ;;
+        armhf) gnu_lib_dir="arm-linux-gnueabihf"; loader="ld-linux-armhf.so.3"; loader_link="/lib/ld-linux-armhf.so.3" ;;
+    esac
+
+    cp -a "${tmp_dir}/lib/${gnu_lib_dir}/"*.so* "$runtime_dir"/ 2>/dev/null || true
+    cp -a "${tmp_dir}/usr/lib/${gnu_lib_dir}/"*.so* "$runtime_dir"/ 2>/dev/null || true
+    loader_path=$(find "$tmp_dir" -name "$loader" | head -n 1)
+    [ -n "$loader_path" ] && cp -a "$loader_path" "$runtime_dir"/
+    mkdir -p "$(dirname "$loader_link")"
+    if [ -f "${runtime_dir}/${loader}" ]; then
+        ln -sf "${runtime_dir}/${loader}" "$loader_link"
+    fi
+
+    rm -rf "$tmp_dir"
+    echo -e "${GREEN}✓ Debian glibc 运行库注入完成。${RESET}"
+}
+
 select_snell_version() {
     echo -e "${CYAN}请选择要安装的 Snell 版本：${RESET}"
     echo -e "${GREEN}1.${RESET} Snell v4"
-    echo -e "${GREEN}2.${RESET} Snell v5"
+    echo -e "${GREEN}2.${RESET} Snell v5（Alpine 将注入 Debian glibc 运行库）"
     while true; do
         printf "请输入选项 [1-2]，回车默认 [2]: "
         read -r choice
@@ -182,9 +256,7 @@ open_port() {
     fi
 }
 
-install_snell_binary() {
-    select_snell_version
-    get_latest_snell_version
+download_snell_binary() {
     snell_url=$(get_snell_download_url)
     echo -e "${CYAN}正在下载 Snell: ${snell_url}${RESET}"
     tmp_dir=$(mktemp -d)
@@ -192,8 +264,27 @@ install_snell_binary() {
     unzip -o "${tmp_dir}/snell-server.zip" -d "$tmp_dir"
     install -m 755 "${tmp_dir}/snell-server" "${INSTALL_DIR}/snell-server"
     rm -rf "$tmp_dir"
+}
 
-    verify_snell_binary
+install_snell_binary() {
+    select_snell_version
+    get_latest_snell_version
+
+    if [ "$SNELL_VERSION_CHOICE" = "v5" ]; then
+        install_debian_glibc_runtime
+    fi
+
+    download_snell_binary
+
+    if verify_snell_binary; then
+        return 0
+    fi
+
+    echo -e "${RED}Snell ${SNELL_VERSION} 兼容性测试失败。${RESET}"
+    echo -e "${YELLOW}最近一次检测输出:${RESET}"
+    cat /tmp/snell-probe.log 2>/dev/null || true
+    echo -e "${YELLOW}可尝试手动执行: ${INSTALL_DIR}/snell-server -c ${SNELL_CONF_FILE}${RESET}"
+    exit 1
 }
 
 run_snell_probe() {
@@ -262,11 +353,7 @@ EOF_WRAPPER
         done
     fi
 
-    echo -e "${RED}Snell 兼容性测试失败，请检查 glibc/gcompat 环境。${RESET}"
-    echo -e "${YELLOW}最近一次检测输出:${RESET}"
-    cat /tmp/snell-probe.log 2>/dev/null || true
-    echo -e "${YELLOW}可尝试手动执行: ${INSTALL_DIR}/snell-server -c ${SNELL_CONF_FILE}${RESET}"
-    exit 1
+    return 1
 }
 
 install_shadowtls_binary() {
