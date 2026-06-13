@@ -152,7 +152,9 @@ install_debian_glibc_runtime() {
     cp -a "${tmp_dir}/lib/${gnu_lib_dir}/"*.so* "$runtime_dir"/ 2>/dev/null || true
     cp -a "${tmp_dir}/usr/lib/${gnu_lib_dir}/"*.so* "$runtime_dir"/ 2>/dev/null || true
     loader_path=$(find "$tmp_dir" -name "$loader" | head -n 1)
-    [ -n "$loader_path" ] && cp -a "$loader_path" "$runtime_dir"/
+    # Debian amd64 的 /lib64/ld-linux-x86-64.so.2 可能是绝对路径软链接；
+    # 复制 loader 时必须解引用，否则 Alpine 中会得到一个指向不存在路径的坏链接。
+    [ -n "$loader_path" ] && cp -L "$loader_path" "$runtime_dir"/
     mkdir -p "$(dirname "$loader_link")"
     if [ -f "${runtime_dir}/${loader}" ]; then
         ln -sf "${runtime_dir}/${loader}" "$loader_link"
