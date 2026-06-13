@@ -54,6 +54,24 @@ install_dependencies() {
         fi
         rm -f /tmp/glibc.apk /tmp/glibc-bin.apk
     fi
+
+    fix_glibc_loader_links
+}
+
+fix_glibc_loader_links() {
+    # Alpine 的 gcompat/sgerrand glibc 常提供 /lib/ld-linux-x86-64.so.2，
+    # 但 Snell amd64 二进制的 ELF interpreter 可能寻找 /lib64/ld-linux-x86-64.so.2。
+    # 缺少该路径时，直接执行会报 not found，之前会被误判为“兼容性测试失败”。
+    if [ "$(uname -m)" = "x86_64" ]; then
+        mkdir -p /lib64
+        if [ ! -e /lib64/ld-linux-x86-64.so.2 ]; then
+            if [ -e /lib/ld-linux-x86-64.so.2 ]; then
+                ln -sf /lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
+            elif [ -e /usr/glibc-compat/lib/ld-linux-x86-64.so.2 ]; then
+                ln -sf /usr/glibc-compat/lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
+            fi
+        fi
+    fi
 }
 
 select_snell_version() {
@@ -175,23 +193,47 @@ install_snell_binary() {
     install -m 755 "${tmp_dir}/snell-server" "${INSTALL_DIR}/snell-server"
     rm -rf "$tmp_dir"
 
-    export LD_LIBRARY_PATH="/usr/glibc-compat/lib:${LD_LIBRARY_PATH}"
+    verify_snell_binary
+}
+
+run_snell_probe() {
+    probe_cmd=$1
+    shift
+    # -v/--version 在 Snell v4/v5 中都会快速退出；比 --help 更适合作为运行能力检测。
+    timeout 5s "$probe_cmd" "$@" -v >/tmp/snell-probe.log 2>&1 || \
+        timeout 5s "$probe_cmd" "$@" --version >/tmp/snell-probe.log 2>&1 || \
+        timeout 5s "$probe_cmd" "$@" --help >/tmp/snell-probe.log 2>&1
+}
+
+verify_snell_binary() {
+    export LD_LIBRARY_PATH="/usr/glibc-compat/lib:/usr/local/lib:/usr/lib:/lib:${LD_LIBRARY_PATH}"
     export GLIBC_TUNABLES="glibc.pthread.rseq=0"
-    if timeout 5s "${INSTALL_DIR}/snell-server" --help >/dev/null 2>&1; then
+    fix_glibc_loader_links
+
+    if run_snell_probe "${INSTALL_DIR}/snell-server"; then
         SNELL_COMMAND="${INSTALL_DIR}/snell-server"
-    elif [ -f /usr/glibc-compat/lib/ld-linux-x86-64.so.2 ] && timeout 5s /usr/glibc-compat/lib/ld-linux-x86-64.so.2 "${INSTALL_DIR}/snell-server" --help >/dev/null 2>&1; then
-        cat > "${INSTALL_DIR}/snell-server-wrapper" <<EOF_WRAPPER
-#!/bin/sh
-export LD_LIBRARY_PATH="/usr/glibc-compat/lib:\${LD_LIBRARY_PATH}"
-export GLIBC_TUNABLES="glibc.pthread.rseq=0"
-exec /usr/glibc-compat/lib/ld-linux-x86-64.so.2 ${INSTALL_DIR}/snell-server "\$@"
-EOF_WRAPPER
-        chmod +x "${INSTALL_DIR}/snell-server-wrapper"
-        SNELL_COMMAND="${INSTALL_DIR}/snell-server-wrapper"
-    else
-        echo -e "${RED}Snell 兼容性测试失败，请检查 glibc/gcompat 环境。${RESET}"
-        exit 1
+        return 0
     fi
+
+    for loader in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2 /usr/glibc-compat/lib/ld-linux-x86-64.so.2; do
+        if [ -x "$loader" ] && run_snell_probe "$loader" "${INSTALL_DIR}/snell-server"; then
+            cat > "${INSTALL_DIR}/snell-server-wrapper" <<EOF_WRAPPER
+#!/bin/sh
+export LD_LIBRARY_PATH="/usr/glibc-compat/lib:/usr/local/lib:/usr/lib:/lib:\${LD_LIBRARY_PATH}"
+export GLIBC_TUNABLES="glibc.pthread.rseq=0"
+exec ${loader} ${INSTALL_DIR}/snell-server "\$@"
+EOF_WRAPPER
+            chmod +x "${INSTALL_DIR}/snell-server-wrapper"
+            SNELL_COMMAND="${INSTALL_DIR}/snell-server-wrapper"
+            return 0
+        fi
+    done
+
+    echo -e "${RED}Snell 兼容性测试失败，请检查 glibc/gcompat 环境。${RESET}"
+    echo -e "${YELLOW}最近一次检测输出:${RESET}"
+    cat /tmp/snell-probe.log 2>/dev/null || true
+    echo -e "${YELLOW}可尝试手动执行: ${INSTALL_DIR}/snell-server -v${RESET}"
+    exit 1
 }
 
 install_shadowtls_binary() {

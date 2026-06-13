@@ -84,7 +84,7 @@ sh -c "$(curl -fsSL https://snell-alpine.jinqians.com)"
 
 #### Alpine 安装 Snell + ShadowTLS
 ```bash
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/jinqians/snell.sh/main/snell-shadowtls-alpine.sh)"
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/maywind23/snell.sh/main/snell-shadowtls-alpine.sh)"
 ```
 
 </details>
