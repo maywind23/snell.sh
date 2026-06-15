@@ -1,8 +1,8 @@
 #!/bin/sh
 # =========================================
-# 作者: jinqians
-# 日期: 2026年6月13日
-# 描述: Alpine Linux 一键安装 Snell + ShadowTLS V3 节点
+# Author: maywind23
+# Date: 2026年6月13日
+# Description: Alpine Linux 一键安装 Snell + ShadowTLS V3 节点
 # =========================================
 
 RED='\033[0;31m'
