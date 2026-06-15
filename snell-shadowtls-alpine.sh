@@ -258,7 +258,7 @@ is_port_used() {
 ask_port() {
     prompt=$1
     while true; do
-        printf "%s (1-65535)，回车随机: " "$prompt"
+        printf "%s (1-65535)，回车随机: " "$prompt" >&2
         read -r port
         if [ -z "$port" ]; then
             port=$(random_port)
