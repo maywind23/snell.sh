@@ -152,6 +152,7 @@ install_debian_glibc_runtime() {
     cp -a "${tmp_dir}/lib/${gnu_lib_dir}/"*.so* "$runtime_dir"/ 2>/dev/null || true
     cp -a "${tmp_dir}/usr/lib/${gnu_lib_dir}/"*.so* "$runtime_dir"/ 2>/dev/null || true
     loader_path=$(find "$tmp_dir" -name "$loader" | head -n 1)
+    rm -f "${runtime_dir}/${loader}"
     if [ -n "$loader_path" ]; then
         if [ -L "$loader_path" ]; then
             loader_target=$(readlink "$loader_path")
